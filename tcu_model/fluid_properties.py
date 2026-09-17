@@ -61,3 +61,33 @@ class Water(FluidProperties):
     def k(self, T: float) -> float:
         Tc = T - 273.15
         return 0.5706 + 0.0017 * Tc - 6e-6 * Tc**2
+
+
+class Air(FluidProperties):
+    """Correlazioni approssimate per aria secca a pressione atmosferica.
+
+    Usata per il lato esterno (ambiente) dello scambio termico delle
+    tubazioni (convezione naturale, vedi ``hydraulics.py``), non come
+    fluido di processo della TCU.
+    """
+
+    def rho(self, T: float) -> float:
+        # Gas ideale a p = 101325 Pa, R_specifica_aria = 287.05 J/(kg K)
+        return 101325.0 / (287.05 * T)
+
+    def cp(self, T: float) -> float:
+        Tc = T - 273.15
+        return 1005.0 + 0.05 * Tc
+
+    def mu(self, T: float) -> float:
+        # Correlazione di Sutherland
+        mu0, T0, S = 1.716e-5, 273.15, 110.4
+        return mu0 * (T / T0) ** 1.5 * (T0 + S) / (T + S)
+
+    def k(self, T: float) -> float:
+        Tc = T - 273.15
+        return 0.0243 + 7.6e-5 * Tc
+
+    def beta(self, T: float) -> float:
+        """Coefficiente di dilatazione termica volumetrica [1/K] (gas ideale)."""
+        return 1.0 / T

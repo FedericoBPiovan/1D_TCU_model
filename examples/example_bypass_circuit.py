@@ -50,11 +50,11 @@ def build_circuit() -> tuple[Circuit, Tank, Heater, HeatExchanger,
     pump = Pump("pump", H0=8.0, a=60000.0, b=0.0, speed=1.0)
     heater = Heater("heater", volume=0.002, power=0.0, efficiency=0.98,
                      K=800.0, T0=T0)
-    load_hx = HeatExchanger("load_hx", volume=0.001, epsilon=0.35,
+    load_hx = HeatExchanger("load_hx", volume=0.001, UA=150.0,
                              T_sink=300.15, K=3000.0, T0=T0)
-    bypass_valve = HydraulicResistance("bypass_valve", K=1500.0, opening=0.4)
+    bypass_valve = HydraulicResistance.from_Kv("bypass_valve", Kv=30.0, opening=0.4)
     return_pipe = Pipe("return_pipe", length=3.0, diameter=0.02,
-                        roughness=1.5e-5, U_amb=8.0, T_amb=293.15, T0=T0)
+                        roughness=1.5e-5, T_amb=293.15, T0=T0)
 
     circuit.add_branch("pump", pump, "tank", "A")
     circuit.add_branch("heater", heater, "A", "B")

@@ -1,6 +1,12 @@
 """Blocchi fisici della TCU (stile Simscape): Pompa, Tubazione, Valvola,
 Riscaldatore, Scambiatore, Serbatoio.
 
+Le correlazioni di perdita di carico e scambio termico usano le librerie
+``fluids`` (Darcy-Weisbach con fattore di attrito di Colebrook, sizing
+valvole da Kv) e ``ht`` (convezione interna/esterna per le tubazioni,
+efficacia NTU per lo scambiatore) invece di formule auto-contenute — vedi
+``hydraulics.py``.
+
 Ogni componente e' un "ramo" (branch) che collega due nodi (porte) di una
 rete idraulica-termica. L'interfaccia e' volutamente uniforme in modo che
 la rete (vedi ``network.py``) possa assemblare automaticamente il sistema
@@ -24,8 +30,12 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 
+from ht.hx import NTU_from_UA, effectiveness_from_NTU
+
 from .fluid_properties import FluidProperties
-from .hydraulics import pipe_pressure_drop, quadratic_resistance_drop
+from .hydraulics import (pipe_overall_heat_transfer_coefficient,
+                          pipe_pressure_drop, quadratic_resistance_drop,
+                          valve_K_from_Kv)
 
 
 class Component(ABC):
@@ -56,19 +66,26 @@ class Component(ABC):
 
 
 class Pipe(Component):
-    """Tratto di tubazione: perdita di carico distribuita + dispersione
-    termica verso l'ambiente (modello U*A)."""
+    """Tratto di tubazione: perdita di carico distribuita (``fluids``,
+    fattore di attrito di Colebrook) + dispersione termica verso l'ambiente.
+
+    Il coefficiente di scambio U verso l'ambiente e' calcolato di default
+    dalle correlazioni di ``ht`` (convezione forzata interna + convezione
+    naturale esterna da un cilindro orizzontale, resistenze in serie,
+    parete/isolamento trascurati). Passare ``U_amb`` esplicito per
+    forzare un valore di targa (es. tubo isolato) invece di calcolarlo.
+    """
 
     has_thermal_state = True
 
     def __init__(self, name: str, length: float, diameter: float,
-                 roughness: float = 1.5e-5, U_amb: float = 5.0,
+                 roughness: float = 1.5e-5, U_amb: float | None = None,
                  T_amb: float = 293.15, T0: float = 293.15):
         self.name = name
         self.length = length
         self.diameter = diameter
         self.roughness = roughness
-        self.U_amb = U_amb  # coefficiente scambio globale verso ambiente [W/(m2 K)]
+        self.U_amb = U_amb  # None => calcolato da ht ad ogni valutazione
         self.T_amb = T_amb
         self.T = T0  # stato: temperatura di uscita del volume di fluido nel tubo
 
@@ -87,7 +104,11 @@ class Pipe(Component):
 
     def thermal_source(self, T_out, T_in, mdot, fluid):
         area_ext = math.pi * self.diameter * self.length
-        return -self.U_amb * area_ext * (T_out - self.T_amb)
+        U = self.U_amb
+        if U is None:
+            U = pipe_overall_heat_transfer_coefficient(
+                mdot, self.diameter, fluid, T_out, self.T_amb, self.roughness)
+        return -U * area_ext * (T_out - self.T_amb)
 
 
 class HydraulicResistance(Component):
@@ -104,6 +125,19 @@ class HydraulicResistance(Component):
         self.K = K
         self.opening = opening
         self.opening_min = opening_min
+
+    @classmethod
+    def from_Kv(cls, name: str, Kv: float, rho_ref: float = 1000.0,
+                opening: float = 1.0, opening_min: float = 0.02) -> "HydraulicResistance":
+        """Costruisce la valvola dal coefficiente di targa Kv [m3/h a
+        dP=1 bar] invece che dal coefficiente astratto K, usando la
+        formula standard IEC 60534 (vedi ``hydraulics.valve_K_from_Kv``).
+        ``rho_ref`` e' la densita' di riferimento per la conversione
+        (l'eventuale variazione di K con la temperatura del fluido e'
+        trascurata, in linea con l'approssimazione di curva statica).
+        """
+        K = valve_K_from_Kv(Kv, rho_ref)
+        return cls(name, K, opening=opening, opening_min=opening_min)
 
     def set_opening(self, opening: float) -> None:
         self.opening = min(max(opening, 0.0), 1.0)
@@ -184,24 +218,31 @@ class Heater(Component):
 
 
 class HeatExchanger(Component):
-    """Scambiatore semplificato a efficienza costante verso un pozzo/sorgente
-    secondario a temperatura fissata (es. acqua di raffreddamento impianto,
-    o processo/stampo lato utenza).
+    """Scambiatore verso un pozzo/sorgente secondario a temperatura
+    fissata (es. acqua di raffreddamento impianto, o processo/stampo lato
+    utenza), a "capacita' termica secondaria infinita" (Cr = 0: condizione
+    coerente con l'assunzione di T_sink costante, tipica di un condensatore/
+    evaporatore o di un bagno termostatico molto piu' grande del circuito
+    primario).
 
-    Q = epsilon * mdot * cp(T_in) * (T_in - T_sink)   [W], rimosso dal
-    fluido primario se T_in > T_sink (raffreddamento).
+    L'efficacia non e' piu' un parametro costante ma viene ricalcolata ad
+    ogni passo dal metodo NTU-efficacia (``ht.hx.effectiveness_from_NTU``,
+    Cr=0 => epsilon = 1 - exp(-NTU)) a partire da un coefficiente globale
+    di scambio ``UA`` [W/K] (parametro di targa dello scambiatore) e dalla
+    portata istantanea: NTU = UA / (mdot * cp). Questo e' fisicamente piu'
+    corretto di un'efficienza fissa, perche' l'efficacia di uno scambiatore
+    diminuisce con l'aumentare della portata (meno tempo di residenza).
 
-    Approssimazione: l'efficienza (NTU-epsilon) e' presa costante invece di
-    essere ricalcolata da mdot, geometria e proprieta' lato secondario.
+    Q = epsilon(mdot) * mdot * cp(T_in) * (T_in - T_sink)   [W]
     """
 
     has_thermal_state = True
 
-    def __init__(self, name: str, volume: float, epsilon: float,
+    def __init__(self, name: str, volume: float, UA: float,
                  T_sink: float, K: float = 5.0e3, T0: float = 293.15):
         self.name = name
         self.volume = volume
-        self.epsilon = epsilon
+        self.UA = UA
         self.T_sink = T_sink
         self.K = K
         self.T = T0
@@ -214,8 +255,12 @@ class HeatExchanger(Component):
         return self.volume * fluid.rho(T_ref) * fluid.cp(T_ref)
 
     def thermal_source(self, T_out, T_in, mdot, fluid):
-        cp = fluid.cp(T_in)
-        return -self.epsilon * abs(mdot) * cp * (T_in - self.T_sink)
+        Cmin = abs(mdot) * fluid.cp(T_in)
+        if Cmin <= 0:
+            return 0.0
+        NTU = NTU_from_UA(UA=self.UA, Cmin=Cmin)
+        epsilon = effectiveness_from_NTU(NTU=NTU, Cr=0.0, subtype="counterflow")
+        return -epsilon * Cmin * (T_in - self.T_sink)
 
 
 class Tank:
