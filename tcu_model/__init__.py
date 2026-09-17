@@ -8,6 +8,7 @@ approssimazioni).
 
 from .components import Heater, HeatExchanger, HydraulicResistance, Pipe, Pump, Tank
 from .controller import PID
+from .diagram import draw_circuit
 from .fluid_properties import Air, Water
 from .network import Circuit
 
@@ -22,4 +23,5 @@ __all__ = [
     "Air",
     "Water",
     "Circuit",
+    "draw_circuit",
 ]

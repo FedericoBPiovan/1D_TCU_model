@@ -31,7 +31,8 @@ matplotlib.use("Agg")  # backend non interattivo per l'esecuzione da script
 import matplotlib.pyplot as plt
 
 from tcu_model import (PID, Circuit, Heater, HeatExchanger,
-                        HydraulicResistance, Pipe, Pump, Tank, Water)
+                        HydraulicResistance, Pipe, Pump, Tank, Water,
+                        draw_circuit)
 
 
 def build_circuit() -> tuple[Circuit, Tank, Heater, HeatExchanger,
@@ -50,8 +51,14 @@ def build_circuit() -> tuple[Circuit, Tank, Heater, HeatExchanger,
     pump = Pump("pump", H0=8.0, a=60000.0, b=0.0, speed=1.0)
     heater = Heater("heater", volume=0.002, power=0.0, efficiency=0.98,
                      K=800.0, T0=T0)
-    load_hx = HeatExchanger("load_hx", volume=0.001, UA=150.0,
-                             T_sink=300.15, K=3000.0, T0=T0)
+    # Scambiatore dimensionato da un punto di funzionamento di targa
+    # (come da datasheet), invece che da UA/K astratti: a portata nominale
+    # 0.084 kg/s il fluido primario entra a 45 degC/1.05 bar(g) ed esce a
+    # 38 degC/1.00 bar(g), verso un pozzo (acqua di processo) a 27 degC.
+    load_hx = HeatExchanger.from_design_point(
+        "load_hx", volume=0.001, fluid=fluid, mdot_design=0.084,
+        T_in_design=318.15, T_out_design=311.15,
+        P_in_design=1.05e5, P_out_design=1.00e5, T_sink=300.15, T0=T0)
     bypass_valve = HydraulicResistance.from_Kv("bypass_valve", Kv=30.0, opening=0.4)
     return_pipe = Pipe("return_pipe", length=3.0, diameter=0.02,
                         roughness=1.5e-5, T_amb=293.15, T0=T0)
@@ -79,6 +86,7 @@ def run_simulation():
            "mdot_pump": [], "mdot_load": [], "mdot_bypass": [], "power": []}
 
     t = 0.0
+    mdots, node_T = {}, {}
     for _ in range(n_steps):
         mdots = circuit.solve_hydraulics()
         node_T = circuit.thermal_step(dt, mdots)
@@ -98,7 +106,7 @@ def run_simulation():
         log["mdot_bypass"].append(mdots["bypass_valve"])
         log["power"].append(power)
 
-    return log, setpoint_T - 273.15
+    return log, setpoint_T - 273.15, circuit, mdots, node_T
 
 
 def plot_results(log, setpoint_C, out_path):
@@ -131,7 +139,7 @@ def plot_results(log, setpoint_C, out_path):
 
 
 if __name__ == "__main__":
-    log, setpoint_C = run_simulation()
+    log, setpoint_C, circuit, mdots, node_T = run_simulation()
     out_dir = os.path.join(os.path.dirname(__file__), "..", "outputs")
     os.makedirs(out_dir, exist_ok=True)
     plot_results(log, setpoint_C, os.path.join(out_dir, "example_bypass_circuit.png"))
@@ -140,3 +148,11 @@ if __name__ == "__main__":
     print(f"mdot pompa finale: {log['mdot_pump'][-1]:.4f} kg/s")
     print(f"mdot load/bypass finali: {log['mdot_load'][-1]:.4f} / "
           f"{log['mdot_bypass'][-1]:.4f} kg/s")
+
+    # Schema a blocchi del circuito, nel punto di funzionamento finale
+    # raggiunto dalla simulazione (stesso oggetto circuit, stesso stato).
+    fig = draw_circuit(circuit, mdots=mdots, node_temperatures=node_T,
+                        title="Schema a blocchi del circuito TCU")
+    diagram_path = os.path.join(out_dir, "circuit_diagram.png")
+    fig.savefig(diagram_path, dpi=120, bbox_inches="tight")
+    print(f"Schema a blocchi salvato in {diagram_path}")

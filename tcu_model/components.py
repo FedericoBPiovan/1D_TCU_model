@@ -30,7 +30,8 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 
-from ht.hx import NTU_from_UA, effectiveness_from_NTU
+from ht.hx import (NTU_from_effectiveness, NTU_from_UA, UA_from_NTU,
+                    effectiveness_from_NTU)
 
 from .fluid_properties import FluidProperties
 from .hydraulics import (pipe_overall_heat_transfer_coefficient,
@@ -246,6 +247,48 @@ class HeatExchanger(Component):
         self.T_sink = T_sink
         self.K = K
         self.T = T0
+
+    @classmethod
+    def from_design_point(cls, name: str, volume: float, fluid: FluidProperties,
+                           mdot_design: float, T_in_design: float,
+                           T_out_design: float, P_in_design: float,
+                           P_out_design: float, T_sink: float,
+                           T0: float = 293.15) -> "HeatExchanger":
+        """Costruisce lo scambiatore da un punto di funzionamento di targa
+        (come riportato in un datasheet: temperature e pressioni di
+        ingresso/uscita ad una portata nominale) invece che da ``UA``/``K``
+        astratti.
+
+        - ``UA`` e' ricavato dal salto di temperatura di progetto: NTU e'
+          l'inverso dell'efficacia NTU-epsilon (``ht.hx``, Cr=0, coerente
+          con l'assunzione di T_sink fissata) e UA = NTU * mdot * cp.
+        - ``K`` (perdita di carico quadratica) e' ricavato dalla caduta di
+          pressione di progetto: K = (P_in - P_out) / mdot_design^2.
+
+        Approssimazione: un solo punto di funzionamento nominale non
+        determina la curva completa (UA e K restano poi costanti al
+        variare delle condizioni), a differenza di ``UA``/``K`` misurati
+        su piu' punti.
+        """
+        if mdot_design <= 0:
+            raise ValueError("mdot_design deve essere positivo")
+        if T_in_design == T_sink:
+            raise ValueError("T_in_design non puo' coincidere con T_sink")
+
+        Cmin_design = mdot_design * fluid.cp(T_in_design)
+        epsilon_design = (T_in_design - T_out_design) / (T_in_design - T_sink)
+        if not 0.0 < epsilon_design < 1.0:
+            raise ValueError(
+                "Punto di progetto non fisico: l'efficacia implicita "
+                f"({epsilon_design:.3f}) deve essere tra 0 e 1 - verifica "
+                "T_in/T_out/T_sink."
+            )
+        NTU_design = NTU_from_effectiveness(epsilon_design, Cr=0.0, subtype="counterflow")
+        UA = UA_from_NTU(NTU=NTU_design, Cmin=Cmin_design)
+
+        K = (P_in_design - P_out_design) / mdot_design**2
+
+        return cls(name, volume, UA, T_sink, K=K, T0=T0)
 
     def hydraulic_residual(self, mdot, p_from, p_to, fluid, T_avg):
         dP = quadratic_resistance_drop(mdot, self.K)
